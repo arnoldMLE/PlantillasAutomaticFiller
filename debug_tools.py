@@ -1,0 +1,436 @@
+# debug_tools.py
+"""
+Herramientas de debugging para el sistema CSV-Firebird
+Ayuda a diagnosticar problemas de conexión, formato, y rendimiento
+"""
+
+import polars as pl
+import fdb
+import os
+import traceback
+from datetime import datetime
+from config import DATABASE_CONFIG, CSV_CONFIG
+
+class DebugTools:
+    """Herramientas de diagnóstico y debugging"""
+    
+    def __init__(self):
+        self.test_results = {}
+    
+    def run_full_diagnostic(self):
+        """Ejecuta diagnóstico completo del sistema"""
+        print("[BUSCAR] INICIANDO DIAGNÓSTICO COMPLETO DEL SISTEMA")
+        print("=" * 60)
+        
+        tests = [
+            ("Configuración", self.test_configuration),
+            ("Dependencias Python", self.test_python_dependencies),
+            ("Conexión Firebird", self.test_firebird_connection),
+            ("Funcionalidad Polars", self.test_polars_functionality),
+            ("Rendimiento I/O", self.test_io_performance),
+            ("Formato CSV", self.test_csv_format),
+            ("Consulta Base de Datos", self.test_database_query),
+        ]
+        
+        results = {}
+        
+        for test_name, test_func in tests:
+            print(f"\n[TEST] Probando: {test_name}")
+            print("-" * 40)
+            
+            try:
+                result = test_func()
+                results[test_name] = result
+                
+                if result.get('success'):
+                    print(f"[CHECK] {test_name}: OK")
+                else:
+                    print(f"[X] {test_name}: FALLO")
+                    if result.get('error'):
+                        print(f"   Error: {result['error']}")
+                        
+            except Exception as e:
+                error_msg = str(e)
+                results[test_name] = {'success': False, 'error': error_msg}
+                print(f"[X] {test_name}: EXCEPCIÓN - {error_msg}")
+        
+        # Resumen final
+        self._print_diagnostic_summary(results)
+        return results
+    
+    def test_configuration(self):
+        """Verifica la configuración del sistema"""
+        try:
+            # Verificar DATABASE_CONFIG
+            required_db_keys = ['host', 'database_path', 'user', 'password']
+            missing_keys = [key for key in required_db_keys if not DATABASE_CONFIG.get(key)]
+            
+            if missing_keys:
+                return {
+                    'success': False,
+                    'error': f"Faltan configuraciones: {', '.join(missing_keys)}"
+                }
+            
+            # Verificar que el archivo de BD existe
+            db_path = DATABASE_CONFIG['database_path']
+            if not os.path.exists(db_path):
+                return {
+                    'success': False,
+                    'error': f"Archivo de BD no encontrado: {db_path}"
+                }
+            
+            file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+            
+            return {
+                'success': True,
+                'database_size_mb': file_size_mb,
+                'database_path': db_path,
+                'host': DATABASE_CONFIG['host']
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def test_python_dependencies(self):
+        """Verifica que todas las dependencias estén instaladas"""
+        dependencies = {
+            'polars': 'pl',
+            'fdb': 'fdb',
+            'fastapi': 'fastapi',
+            'pydantic': 'pydantic',
+            'uvicorn': 'uvicorn'
+        }
+        
+        results = {'success': True, 'installed': {}, 'missing': []}
+        
+        for dep_name, import_name in dependencies.items():
+            try:
+                module = __import__(import_name)
+                version = getattr(module, '__version__', 'unknown')
+                results['installed'][dep_name] = version
+                print(f"   [CHECK] {dep_name}: {version}")
+            except ImportError:
+                results['missing'].append(dep_name)
+                results['success'] = False
+                print(f"   [X] {dep_name}: NO INSTALADO")
+        
+        return results
+    
+    def test_firebird_connection(self):
+        """Prueba la conexión a Firebird"""
+        try:
+            # Intentar conexión
+            con = fdb.connect(
+                host=DATABASE_CONFIG['host'],
+                database=DATABASE_CONFIG['database_path'],
+                user=DATABASE_CONFIG['user'],
+                password=DATABASE_CONFIG['password'],
+                charset=DATABASE_CONFIG['charset']
+            )
+            
+            # Probar consulta básica
+            cur = con.cursor()
+            cur.execute("SELECT 1 FROM RDB$DATABASE")
+            result = cur.fetchone()
+            
+            # Obtener información de la BD
+            cur.execute("SELECT COUNT(*) FROM RDB$RELATIONS WHERE RDB$SYSTEM_FLAG = 0")
+            table_count = cur.fetchone()[0]
+            
+            con.close()
+            
+            return {
+                'success': True,
+                'connection_test': 'OK',
+                'user_tables': table_count,
+                'charset': DATABASE_CONFIG['charset']
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'suggestion': self._get_firebird_error_suggestion(str(e))
+            }
+    
+    def test_polars_functionality(self):
+        """Prueba funcionalidad básica de Polars"""
+        try:
+            # Crear DataFrame de prueba
+            test_data = {
+                'propuesta': ['PROP_001', 'PROP_002', 'PROP_003'],
+                'cliente': ['Cliente A', 'Cliente B', 'Cliente C'],
+                'monto': [1000, 2000, 3000]
+            }
+            
+            df = pl.DataFrame(test_data)
+            
+            # Probar operaciones básicas
+            filtered = df.filter(pl.col('monto') > 1500)
+            count = filtered.height
+            
+            # Probar I/O
+            test_file = 'test_polars_debug.csv'
+            df.write_csv(test_file)
+            df_read = pl.read_csv(test_file)
+            os.remove(test_file)
+            
+            return {
+                'success': True,
+                'dataframe_creation': 'OK',
+                'filtering': f'{count} filas filtradas',
+                'csv_io': 'OK',
+                'polars_version': pl.__version__
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def test_io_performance(self):
+        """Prueba rendimiento de I/O con archivos CSV"""
+        try:
+            import time
+            
+            # Crear archivo de prueba grande
+            test_file = 'performance_test.csv'
+            rows = 10000
+            
+            # Medir escritura
+            start_time = time.time()
+            
+            data = {
+                'col1': [f'value_{i}' for i in range(rows)],
+                'col2': [f'prop_{i}' for i in range(rows)],
+                'col3': list(range(rows))
+            }
+            
+            df = pl.DataFrame(data)
+            df.write_csv(test_file)
+            write_time = time.time() - start_time
+            
+            # Medir lectura
+            start_time = time.time()
+            df_read = pl.read_csv(test_file)
+            read_time = time.time() - start_time
+            
+            # Limpiar
+            os.remove(test_file)
+            
+            return {
+                'success': True,
+                'rows_tested': rows,
+                'write_time': f"{write_time:.3f}s",
+                'read_time': f"{read_time:.3f}s",
+                'write_speed': f"{rows/write_time:,.0f} rows/s",
+                'read_speed': f"{rows/read_time:,.0f} rows/s"
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def test_csv_format(self):
+        """Verifica formato de archivos CSV en el directorio"""
+        csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and not f.startswith('test_')]
+        
+        if not csv_files:
+            return {
+                'success': False,
+                'error': 'No se encontraron archivos CSV para verificar'
+            }
+        
+        results = {'success': True, 'files_checked': len(csv_files), 'file_details': []}
+        
+        for csv_file in csv_files[:3]:  # Verificar solo los primeros 3
+            try:
+                df = pl.read_csv(
+                file_path,
+                has_header=False,
+                truncate_ragged_lines=True,
+                ignore_errors=True,
+                infer_schema_length=0
+                
+                file_detail = {
+                    'filename': csv_file,
+                    'rows_sample': df.height,
+                    'columns': df.width,
+                    'size_mb': os.path.getsize(csv_file) / (1024 * 1024)
+                }
+                
+                # Verificar columna B (PROPUESTA JKM)
+                if df.width > 1:
+                    col_b_sample = df.get_column('column_1')[10:13] if df.height > 10 else df.get_column('column_1')
+                    propuestas_found = [val for val in col_b_sample if val and str(val).strip()]
+                    file_detail['propuestas_sample'] = len(propuestas_found)
+                    file_detail['sample_values'] = propuestas_found[:2]
+                
+                results['file_details'].append(file_detail)
+                print(f"   [CHECK] {csv_file}: {file_detail['rows_sample']} filas, {file_detail['columns']} cols")
+                
+            except Exception as e:
+                results['success'] = False
+                results['file_details'].append({
+                    'filename': csv_file,
+                    'error': str(e)
+                })
+                print(f"   [X] {csv_file}: Error - {str(e)}")
+        
+        return results
+    
+    def test_database_query(self):
+        """Prueba consulta específica de propuestas"""
+        try:
+            # Usar una propuesta de ejemplo
+            test_legajo = "642799"  # Del ejemplo proporcionado
+            
+            con = fdb.connect(
+                host=DATABASE_CONFIG['host'],
+                database=DATABASE_CONFIG['database_path'],
+                user=DATABASE_CONFIG['user'],
+                password=DATABASE_CONFIG['password'],
+                charset=DATABASE_CONFIG['charset']
+            )
+            
+            # Consulta de prueba
+            query = """
+            SELECT DISTINCT 
+                p.LEGAJO AS COD_PROPUESTA,
+                c.NOMBRE as Nombre_Cliente,
+                s.NOMBRE AS SUCURSAL
+            FROM CONTRATOS_CLIENTES cc
+            INNER JOIN clientes c ON cc.COD_CLIENTE=c.COD_CLIENTE
+            INNER JOIN contratos ct ON cc.COD_CONTRATO=ct.COD_CONTRATO
+            INNER JOIN propuesta p ON ct.COD_PROPUESTA=p.COD_PROPUESTA
+            INNER JOIN creditos cr ON cr.COD_PROPUESTA = p.COD_PROPUESTA
+            INNER JOIN sucursales s ON cr.COD_SUCURSAL=s.COD_SUCURSAL
+            WHERE p.LEGAJO = ?
+            """
+            
+            cur = con.cursor()
+            
+            # Medir tiempo de consulta
+            import time
+            start_time = time.time()
+            cur.execute(query, (test_legajo,))
+            row = cur.fetchone()
+            query_time = time.time() - start_time
+            
+            con.close()
+            
+            if row:
+                return {
+                    'success': True,
+                    'test_legajo': test_legajo,
+                    'query_time': f"{query_time:.3f}s",
+                    'result_found': True,
+                    'cliente_nombre': row[1] if len(row) > 1 else 'N/A',
+                    'sucursal': row[2] if len(row) > 2 else 'N/A'
+                }
+            else:
+                return {
+                    'success': False,
+                    'test_legajo': test_legajo,
+                    'query_time': f"{query_time:.3f}s",
+                    'error': 'No se encontró resultado para el LEGAJO de prueba'
+                }
+                
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _get_firebird_error_suggestion(self, error_msg: str) -> str:
+        """Sugiere soluciones para errores comunes de Firebird"""
+        error_lower = error_msg.lower()
+        
+        if 'network request to host' in error_lower:
+            return "Verificar que el servicio de Firebird esté ejecutándose y el puerto 3050 esté abierto"
+        elif 'no such file or directory' in error_lower:
+            return "Verificar la ruta del archivo .fdb en DATABASE_CONFIG"
+        elif 'your user name and password' in error_lower:
+            return "Verificar usuario y contraseña en DATABASE_CONFIG"
+        elif 'connection timeout' in error_lower:
+            return "Verificar conectividad de red al servidor Firebird"
+        else:
+            return "Revisar configuración de Firebird y permisos de archivo"
+    
+    def _print_diagnostic_summary(self, results):
+        """Imprime resumen del diagnóstico"""
+        print("\n" + "=" * 60)
+        print("[LISTA] RESUMEN DEL DIAGNÓSTICO")
+        print("=" * 60)
+        
+        passed = sum(1 for r in results.values() if r.get('success'))
+        total = len(results)
+        
+        print(f"[CHECK] Pruebas exitosas: {passed}/{total}")
+        print(f"[X] Pruebas fallidas: {total - passed}/{total}")
+        
+        if passed == total:
+            print("\n[EXITO] SISTEMA COMPLETAMENTE FUNCIONAL")
+            print("[CHECK] Listo para procesar archivos CSV")
+        else:
+            print("\n[WARNING] SE ENCONTRARON PROBLEMAS")
+            print("[INFO] Revisa los errores arriba para solucionarlos")
+        
+        print("=" * 60)
+
+def create_sample_csv():
+    """Crea un CSV de ejemplo con el formato correcto"""
+    sample_file = "ejemplo_propuestas.csv"
+    
+    print("[NOTA] Creando archivo CSV de ejemplo...")
+    
+    with open(sample_file, 'w', encoding='utf-8') as f:
+        # Headers (filas 1-10)
+        headers = [
+            "ID EXTERNO,# DE ORDEN,TIPO DE VENTA,CATEGORIA DE LA TRANSACCIÓN,ID EXTERNO CLIENTE,CLIENTE",
+            "ENCABEZADO,ENCABEZAMIENTO,ENCABEZAMIENTO,ENCABEZAMIENTO,ENCABEZAMIENTO,ENCABEZAMIENTO",
+            "Este es el identificador único,Introduzca el número de orden,Valor fijo Compra a futuro,1.- Venta inicial,Colocar el ID externo,Colocar el ID externo",
+            "de backend. Puede copiarse,de venta. Este campo debe,2.- Dowgrade,o nombre del cliente,o nombre del cliente",
+            "desde el número de pedido,ser único.,3.- Up grade,como se registro en,como se registro en",
+            "en ausencia de un,,,la pantilla clientes.,la pantilla clientes.",
+            "identificador único,,,,,",
+            "de backend.,,,,,",
+            "Alfanumérico,Alfanumérico,Lista,Lista, ,Lista",
+            "PROPUESTA JKM,NUMERO_ORDEN,TIPO_VENTA,CATEGORIA,CLIENTE_ID,CLIENTE"
+        ]
+        
+        for header in headers:
+            f.write(header + "\n")
+        
+        # Datos de ejemplo (desde fila 11)
+        sample_data = [
+            ("OV001", "642799", "Compra a futuro", "Venta inicial", "3782", ""),
+            ("OV002", "642800", "Compra a futuro", "Venta inicial", "3783", ""),
+            ("OV003", "642801", "Compra a futuro", "Upgrade", "3784", ""),
+            ("", "642802", "Compra a futuro", "Venta inicial", "3785", ""),
+            ("OV005", "642803", "Compra a futuro", "Venta inicial", "3786", "")
+        ]
+        
+        for data_row in sample_data:
+            f.write(",".join(data_row) + "\n")
+    
+    print(f"[CHECK] Archivo creado: {sample_file}")
+    print("   [GRAFICO] 10 filas de headers + 5 filas de datos")
+    print("   [TARGET] Columna B contiene los LEGAJOs a buscar")
+    print("   [NOTA] Columna CLIENTE está vacía (se llenará automáticamente)")
+    
+    return sample_file
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
+        
+        if command == "diagnostic":
+            debug_tools = DebugTools()
+            debug_tools.run_full_diagnostic()
+        elif command == "sample":
+            create_sample_csv()
+        else:
+            print(f"[X] Comando desconocido: {command}")
+    else:
+        print("[HERRAMIENTAS] HERRAMIENTAS DE DEBUGGING")
+        print("=" * 40)
+        print("Comandos disponibles:")
+        print("  python debug_tools.py diagnostic  # Diagnóstico completo")
+        print("  python debug_tools.py sample      # Crear CSV de ejemplo")
