@@ -170,10 +170,16 @@ def process_csv_optimized():
                 for result in results:
                     legajo = str(result[0])
                     cliente = result[1]
+                    monto = result[4]
                     
                     # Solo tomar el primer cliente por LEGAJO
                     if legajo not in legajos_processed:
-                        matches[legajo] = cliente
+                        matches[legajo] = {
+                            'cliente': cliente,
+                            'caracter': caracter,
+                            'monto':monto,
+                            'fecha_contrato':fecha_contrato
+                        }
                         legajos_processed.add(legajo)
                         batch_matches += 1
                 
@@ -240,6 +246,17 @@ def process_csv_optimized():
     print("[4/4] Actualizando CSV y guardando...")
     
     cliente_col_name = df.columns[5]  # Columna F (CLIENTE)
+
+    monto_col_name = df.columns[21]  #Columna V (IMPORTE ORIGINAL)
+
+    fecha_col_name = df.columns[7]   #Columna h (FECHA_CONTRATO)
+
+
+    monto_current_values = df.get_column(monto_col_name).to_list()
+
+
+    fecha_contrato_current_values = df.get_column(fecha_col_name).to_list()
+
     current_values = df.get_column(cliente_col_name).to_list()
     
     updates_count = 0
@@ -252,15 +269,21 @@ def process_csv_optimized():
                 if i < len(current_values):
                     current_val = str(current_values[i]).strip()
                     if not current_val or current_val in ['', 'CLIENTE', 'nan', 'None', 'null']:
-                        current_values[i] = matches[legajo]
+                        current_values[i] = matches[legajo]['cliente']
+                        monto_current_values[i] = matches[legajo]['monto']
+                        fecha_contrato_current_values[i] = matches[legajo]['fecha_contrato']
                         updates_count += 1
     
     # Actualizar DataFrame
     while len(current_values) < df.height:
         current_values.append("")
-    
+        monto_current_values.append("")
+        fecha_contrato_current_values.append("")
+
     df = df.with_columns([
-        pl.Series(name=cliente_col_name, values=current_values[:df.height])
+        pl.Series(name=cliente_col_name, values=current_values[:df.height]),
+        pl.Series(name=monto_col_name, values=monto_current_values[:df.height]),
+        pl.Series(name=fecha_col_name, values=fecha_contrato_current_values[:df.height])
     ])
     
     # Guardar archivo
